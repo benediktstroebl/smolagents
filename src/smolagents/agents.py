@@ -840,6 +840,8 @@ Now begin!""",
                         "type": step_log.error.__class__.__name__,
                         "message": str(step_log.error)
                     }
+                    
+            
 
             json_logs.append(json_log)
             
@@ -847,8 +849,15 @@ Now begin!""",
     
     def to_json_stream(self):
         # rewrite json logs to a file
+        json_logs = self.to_json()
+        
+        json_logs.append({
+            "type": "token_usage",
+            "input_tokens": self.monitor.total_input_token_count,
+            "output_tokens": self.monitor.total_output_token_count
+        })
         with open(self.json_logs_path, "w") as f:
-            json.dump(self.to_json(), f)
+            json.dump(json_logs, f)
 
 
 class ToolCallingAgent(MultiStepAgent):
