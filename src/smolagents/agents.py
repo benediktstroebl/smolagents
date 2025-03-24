@@ -67,7 +67,6 @@ from .utils import (
     is_valid_name,
     make_init_file,
     parse_code_blobs,
-    parse_json_tool_call,
     make_json_serializable,
     truncate_content,
 )
