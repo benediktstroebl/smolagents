@@ -2,6 +2,9 @@ name: Quality Check
 
 on: [pull_request]
 
+env:
+  UV_SYSTEM_PYTHON: 1
+
 jobs:
   check_code_quality:
     runs-on: ubuntu-latest
@@ -16,20 +19,14 @@ jobs:
           python-version: "3.12"
 
       # Setup venv
-      # TODO: revisit when https://github.com/astral-sh/uv/issues/1526 is addressed.
-      - name: Setup venv + uv
+      - name: Setup uv
         run: |
           pip install --upgrade uv
-          uv venv
 
       - name: Install dependencies
-        run: uv pip install "smolagents[test] @ ."
-      - run: uv run ruff check tests src # linter
-      - run: uv run ruff format --check tests src # formatter
+        run: uv pip install "smolagents[quality] @ ."
 
-      # Run type checking at least on smolagents root file to check all modules
-      # that can be lazy-loaded actually exist.
-      # - run: uv run mypy src/smolagents/__init__.py --follow-imports=silent --show-traceback
-
-      # Run mypy on full package
-      # - run: uv run mypy src
+      # Equivalent of "make quality" but step by step
+      - run: ruff check examples src tests utils # linter
+      - run: ruff format --check examples src tests utils # formatter
+      - run: python utils/check_tests_in_ci.py

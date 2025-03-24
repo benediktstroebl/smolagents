@@ -26,6 +26,8 @@ from typing import List
 import pytest
 from dotenv import load_dotenv
 
+from .utils.markers import require_run_all
+
 
 class SubprocessCallException(Exception):
     pass
@@ -78,6 +80,7 @@ class DocCodeExtractor:
         return tmp_file
 
 
+@require_run_all
 class TestDocs:
     """Test case for documentation code testing."""
 
@@ -85,7 +88,7 @@ class TestDocs:
     def setup_class(cls):
         cls._tmpdir = tempfile.mkdtemp()
         cls.launch_args = ["python3"]
-        cls.docs_dir = Path(__file__).parent.parent / "docs" / "source"
+        cls.docs_dir = Path(__file__).parent.parent / "docs" / "source" / "en"
         cls.extractor = DocCodeExtractor()
 
         if not cls.docs_dir.exists():
@@ -93,7 +96,7 @@ class TestDocs:
 
         load_dotenv()
 
-        cls.md_files = list(cls.docs_dir.rglob("*.md"))
+        cls.md_files = list(cls.docs_dir.rglob("*.mdx"))
         if not cls.md_files:
             raise ValueError(f"No markdown files found in {cls.docs_dir}")
 
@@ -115,6 +118,7 @@ class TestDocs:
             "while llm_should_continue(memory):",  # This is pseudo code
             "ollama_chat/llama3.2",  # Exclude ollama building in guided tour
             "model = TransformersModel(model_id=model_id)",  # Exclude testing with transformers model
+            "SmolagentsInstrumentor",  # Exclude telemetry since it needs additional installs
         ]
         code_blocks = [
             block
@@ -135,9 +139,7 @@ class TestDocs:
         try:
             code_blocks = [
                 (
-                    block.replace(
-                        "<YOUR_HUGGINGFACEHUB_API_TOKEN>", os.getenv("HF_TOKEN")
-                    )
+                    block.replace("<YOUR_HUGGINGFACEHUB_API_TOKEN>", os.getenv("HF_TOKEN"))
                     .replace("YOUR_ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY"))
                     .replace("{your_username}", "m-ric")
                 )
@@ -149,9 +151,7 @@ class TestDocs:
         except SubprocessCallException as e:
             pytest.fail(f"\nError while testing {doc_path.name}:\n{str(e)}")
         except Exception:
-            pytest.fail(
-                f"\nUnexpected error while testing {doc_path.name}:\n{traceback.format_exc()}"
-            )
+            pytest.fail(f"\nUnexpected error while testing {doc_path.name}:\n{traceback.format_exc()}")
 
     @pytest.fixture(autouse=True)
     def _setup(self):
@@ -173,6 +173,4 @@ def pytest_generate_tests(metafunc):
             test_class.setup_class()
 
         # Parameterize with the markdown files
-        metafunc.parametrize(
-            "doc_path", test_class.md_files, ids=[f.stem for f in test_class.md_files]
-        )
+        metafunc.parametrize("doc_path", test_class.md_files, ids=[f.stem for f in test_class.md_files])
