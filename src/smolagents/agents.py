@@ -22,10 +22,11 @@ import re
 import tempfile
 import textwrap
 import time
+import asyncio
 from collections import deque
 from logging import getLogger
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional, Set, Tuple, TypedDict, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional, Set, Tuple, TypedDict, Union, Coroutine
 
 import jinja2
 import yaml
@@ -296,6 +297,61 @@ class MultiStepAgent:
         agent.run("What is the result of 2 power 3.7384?")
         ```
         """
+        return self._run_sync(
+            task=task,
+            stream=stream,
+            reset=reset,
+            images=images,
+            additional_args=additional_args,
+            max_steps=max_steps,
+        )
+    
+    async def arun(
+        self,
+        task: str,
+        stream: bool = False,
+        reset: bool = True,
+        images: Optional[List["PIL.Image.Image"]] = None,
+        additional_args: Optional[Dict] = None,
+        max_steps: Optional[int] = None,
+    ):
+        """
+        Run the agent for the given task asynchronously.
+
+        Args:
+            task (`str`): Task to perform.
+            stream (`bool`): Whether to run in a streaming way.
+            reset (`bool`): Whether to reset the conversation or keep it going from previous run.
+            images (`list[PIL.Image.Image]`, *optional*): Image(s) objects.
+            additional_args (`dict`, *optional*): Any other variables that you want to pass to the agent run, for instance images or dataframes. Give them clear names!
+            max_steps (`int`, *optional*): Maximum number of steps the agent can take to solve the task. if not provided, will use the agent's default value.
+
+        Example:
+        ```py
+        from smolagents import CodeAgent
+        agent = CodeAgent(tools=[])
+        await agent.arun("What is the result of 2 power 3.7384?")
+        ```
+        """
+        return await self._run_async(
+            task=task,
+            stream=stream,
+            reset=reset,
+            images=images,
+            additional_args=additional_args,
+            max_steps=max_steps,
+        )
+
+    def _run_sync(
+        self, 
+        task: str, 
+        stream: bool = False, 
+        reset: bool = True,
+        images: Optional[List["PIL.Image.Image"]] = None,
+        additional_args: Optional[Dict] = None,
+        max_steps: Optional[int] = None,
+    ):
+        """Synchronous version of the run method."""
         max_steps = max_steps or self.max_steps
         self.task = task
         if additional_args is not None:
@@ -328,6 +384,50 @@ You have been provided with these additional arguments, that you can access usin
         # Outputs are returned only at the end. We only look at the last step.
         return deque(self._run(task=self.task, max_steps=max_steps, images=images), maxlen=1)[0]
 
+    async def _run_async(
+        self, 
+        task: str, 
+        stream: bool = False, 
+        reset: bool = True,
+        images: Optional[List["PIL.Image.Image"]] = None,
+        additional_args: Optional[Dict] = None,
+        max_steps: Optional[int] = None,
+    ):
+        """Asynchronous version of the run method."""
+        max_steps = max_steps or self.max_steps
+        self.task = task
+        if additional_args is not None:
+            self.state.update(additional_args)
+            self.task += f"""
+You have been provided with these additional arguments, that you can access using the keys as variables in your python code:
+{str(additional_args)}."""
+
+        self.system_prompt = self.initialize_system_prompt()
+        self.memory.system_prompt = SystemPromptStep(system_prompt=self.system_prompt)
+        if reset:
+            self.memory.reset()
+            self.monitor.reset()
+
+        self.logger.log_task(
+            content=self.task.strip(),
+            subtitle=f"{type(self.model).__name__} - {(self.model.model_id if hasattr(self.model, 'model_id') else '')}",
+            level=LogLevel.INFO,
+            title=self.name if hasattr(self, "name") else None,
+        )
+        self.memory.steps.append(TaskStep(task=self.task, task_images=images))
+
+        if getattr(self, "python_executor", None):
+            self.python_executor.send_variables(variables=self.state)
+            self.python_executor.send_tools({**self.tools, **self.managed_agents})
+
+        if stream:
+            # The steps are returned as they are executed through a generator to iterate on.
+            return self._arun(task=self.task, max_steps=max_steps, images=images)
+        # Use async version and get the last step
+        async for step in self._arun(task=self.task, max_steps=max_steps, images=images):
+            last_step = step
+        return last_step
+
     def _run(
         self, task: str, max_steps: int, images: List["PIL.Image.Image"] | None = None
     ) -> Generator[ActionStep | AgentType, None, None]:
@@ -354,6 +454,33 @@ You have been provided with these additional arguments, that you can access usin
             yield memory_step
         yield handle_agent_output_types(final_answer)
 
+    async def _arun(
+        self, task: str, max_steps: int, images: List["PIL.Image.Image"] | None = None
+    ):
+        """Asynchronous version of the _run method."""
+        final_answer = None
+        self.step_number = 1
+        while final_answer is None and self.step_number <= max_steps:
+            step_start_time = time.time()
+            memory_step = self._create_memory_step(step_start_time, images)
+            try:
+                final_answer = await self._execute_step_async(task, memory_step)
+            except AgentGenerationError as e:
+                # Agent generation errors are not caused by a Model error but an implementation error: so we should raise them and exit.
+                raise e
+            except AgentError as e:
+                # Other AgentError types are caused by the Model, so we should log them and iterate.
+                memory_step.error = e
+            finally:
+                self._finalize_step(memory_step, step_start_time)
+                yield memory_step
+                self.step_number += 1
+
+        if final_answer is None and self.step_number == max_steps + 1:
+            final_answer = await self._handle_max_steps_reached_async(task, images, step_start_time)
+            yield memory_step
+        yield handle_agent_output_types(final_answer)
+
     def _create_memory_step(self, step_start_time: float, images: List["PIL.Image.Image"] | None) -> ActionStep:
         return ActionStep(step_number=self.step_number, start_time=step_start_time, observations_images=images)
 
@@ -362,6 +489,16 @@ You have been provided with these additional arguments, that you can access usin
             self.planning_step(task, is_first_step=(self.step_number == 1), step=self.step_number)
         self.logger.log_rule(f"Step {self.step_number}", level=LogLevel.INFO)
         final_answer = self.step(memory_step)
+        if final_answer is not None and self.final_answer_checks:
+            self._validate_final_answer(final_answer)
+        return final_answer
+
+    async def _execute_step_async(self, task: str, memory_step: ActionStep) -> Union[None, Any]:
+        """Asynchronous version of _execute_step"""
+        if self.planning_interval is not None and self.step_number % self.planning_interval == 1:
+            await self.planning_step_async(task, is_first_step=(self.step_number == 1), step=self.step_number)
+        self.logger.log_rule(f"Step {self.step_number}", level=LogLevel.INFO)
+        final_answer = await self.astep(memory_step)
         if final_answer is not None and self.final_answer_checks:
             self._validate_final_answer(final_answer)
         return final_answer
@@ -385,6 +522,22 @@ You have been provided with these additional arguments, that you can access usin
 
     def _handle_max_steps_reached(self, task: str, images: List["PIL.Image.Image"], step_start_time: float) -> Any:
         final_answer = self.provide_final_answer(task, images)
+        final_memory_step = ActionStep(
+            step_number=self.step_number, error=AgentMaxStepsError("Reached max steps.", self.logger)
+        )
+        final_memory_step.action_output = final_answer
+        final_memory_step.end_time = time.time()
+        final_memory_step.duration = final_memory_step.end_time - step_start_time
+        self.memory.steps.append(final_memory_step)
+        for callback in self.step_callbacks:
+            callback(final_memory_step) if len(inspect.signature(callback).parameters) == 1 else callback(
+                final_memory_step, agent=self
+            )
+        return final_answer
+
+    async def _handle_max_steps_reached_async(self, task: str, images: List["PIL.Image.Image"], step_start_time: float) -> Any:
+        """Asynchronous version of _handle_max_steps_reached"""
+        final_answer = await self.provide_final_answer_async(task, images)
         final_memory_step = ActionStep(
             step_number=self.step_number, error=AgentMaxStepsError("Reached max steps.", self.logger)
         )
@@ -450,6 +603,67 @@ You have been provided with these additional arguments, that you can access usin
             input_messages = [plan_update_pre] + memory_messages + [plan_update_post]
             plan_message = self.model(input_messages, stop_sequences=["<end_plan>"])
         self._record_planning_step(input_messages, plan_message, is_first_step)
+
+    async def planning_step_async(self, task, is_first_step: bool, step: int) -> None:
+        """Asynchronous version of planning_step"""
+        if is_first_step:
+            input_messages = [
+                {
+                    "role": MessageRole.USER,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": populate_template(
+                                self.prompt_templates["planning"]["initial_plan"],
+                                variables={"task": task, "tools": self.tools, "managed_agents": self.managed_agents},
+                            ),
+                        }
+                    ],
+                }
+            ]
+            plan_message = await self._async_model_call(input_messages, stop_sequences=["<end_plan>"])
+        else:
+            # Summary mode removes the system prompt and previous planning messages output by the model.
+            # Removing previous planning messages avoids influencing too much the new plan.
+            memory_messages = self.write_memory_to_messages(summary_mode=True)
+            plan_update_pre = {
+                "role": MessageRole.SYSTEM,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": populate_template(
+                            self.prompt_templates["planning"]["update_plan_pre_messages"], variables={"task": task}
+                        ),
+                    }
+                ],
+            }
+            plan_update_post = {
+                "role": MessageRole.USER,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": populate_template(
+                            self.prompt_templates["planning"]["update_plan_post_messages"],
+                            variables={
+                                "task": task,
+                                "tools": self.tools,
+                                "managed_agents": self.managed_agents,
+                                "remaining_steps": (self.max_steps - step),
+                            },
+                        ),
+                    }
+                ],
+            }
+            input_messages = [plan_update_pre] + memory_messages + [plan_update_post]
+            plan_message = await self._async_model_call(input_messages, stop_sequences=["<end_plan>"])
+        self._record_planning_step(input_messages, plan_message, is_first_step)
+
+    async def _async_model_call(self, messages, **kwargs):
+        """Helper method to handle async model calls if model supports it, otherwise falls back to sync"""
+        if hasattr(self.model, "acall"):
+            return await self.model.acall(messages, **kwargs)
+        else:
+            return self.model(messages, **kwargs)
 
     def _record_planning_step(self, input_messages: list, plan_message: ChatMessage, is_first_step: bool) -> None:
         if is_first_step:
@@ -565,6 +779,50 @@ You have been provided with these additional arguments, that you can access usin
         except Exception as e:
             return f"Error in generating final LLM output:\n{e}"
 
+    async def provide_final_answer_async(self, task: str, images: Optional[list["PIL.Image.Image"]]) -> str:
+        """
+        Asynchronous version of provide_final_answer.
+
+        Args:
+            task (`str`): Task to perform.
+            images (`list[PIL.Image.Image]`, *optional*): Image(s) objects.
+
+        Returns:
+            `str`: Final answer to the task.
+        """
+        messages = [
+            {
+                "role": MessageRole.SYSTEM,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": self.prompt_templates["final_answer"]["pre_messages"],
+                    }
+                ],
+            }
+        ]
+        if images:
+            messages[0]["content"].append({"type": "image"})
+        messages += self.write_memory_to_messages()[1:]
+        messages += [
+            {
+                "role": MessageRole.USER,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": populate_template(
+                            self.prompt_templates["final_answer"]["post_messages"], variables={"task": task}
+                        ),
+                    }
+                ],
+            }
+        ]
+        try:
+            chat_message: ChatMessage = await self._async_model_call(messages)
+            return chat_message.content
+        except Exception as e:
+            return f"Error in generating final LLM output:\n{e}"
+
     def execute_tool_call(self, tool_name: str, arguments: Union[Dict[str, str], str]) -> Any:
         """
         Execute tool with the provided input and returns the result.
@@ -612,9 +870,82 @@ You have been provided with these additional arguments, that you can access usin
                 )
                 raise AgentExecutionError(error_msg, self.logger)
 
+    async def execute_tool_call_async(self, tool_name: str, arguments: Union[Dict[str, str], str]) -> Any:
+        """
+        Asynchronous version of execute_tool_call.
+        
+        Args:
+            tool_name (`str`): Name of the Tool to execute (should be one from self.tools).
+            arguments (Dict[str, str]): Arguments passed to the Tool.
+        """
+        available_tools = {**self.tools, **self.managed_agents}
+        if tool_name not in available_tools:
+            error_msg = f"Unknown tool {tool_name}, should be instead one of {list(available_tools.keys())}."
+            raise AgentExecutionError(error_msg, self.logger)
+
+        try:
+            tool = available_tools[tool_name]
+            is_managed_agent = tool_name in self.managed_agents
+            
+            # Process arguments, replacing state variables with their values
+            if isinstance(arguments, dict):
+                for key, value in arguments.items():
+                    if isinstance(value, str) and value in self.state:
+                        arguments[key] = self.state[value]
+            
+            # Use the async __acall__ method if available, otherwise fall back to synchronous
+            if isinstance(arguments, str):
+                if is_managed_agent:
+                    if hasattr(tool, "arun"):
+                        observation = await tool.arun(arguments)
+                    else:
+                        observation = tool(arguments)
+                else:
+                    if hasattr(tool, "__acall__"):
+                        observation = await tool.__acall__(arguments, sanitize_inputs_outputs=True)
+                    else:
+                        observation = tool(arguments, sanitize_inputs_outputs=True)
+            else:
+                if is_managed_agent:
+                    if hasattr(tool, "arun"):
+                        observation = await tool.arun(**arguments)
+                    else:
+                        observation = tool(**arguments)
+                else:
+                    if hasattr(tool, "__acall__"):
+                        observation = await tool.__acall__(**arguments, sanitize_inputs_outputs=True)
+                    else:
+                        observation = tool(**arguments, sanitize_inputs_outputs=True)
+                    
+            return observation
+        except Exception as e:
+            if tool_name in self.tools:
+                tool = self.tools[tool_name]
+                error_msg = (
+                    f"Error when executing tool {tool_name} with arguments {arguments}: {type(e).__name__}: {e}\nYou should only use this tool with a correct input.\n"
+                    f"As a reminder, this tool's description is the following: '{tool.description}'.\nIt takes inputs: {tool.inputs} and returns output type {tool.output_type}"
+                )
+                raise AgentExecutionError(error_msg, self.logger)
+            elif tool_name in self.managed_agents:
+                error_msg = (
+                    f"Error in calling team member: {e}\nYou should only ask this team member with a correct request.\n"
+                    f"As a reminder, this team member's description is the following:\n{available_tools[tool_name]}"
+                )
+                raise AgentExecutionError(error_msg, self.logger)
+
     def step(self, memory_step: ActionStep) -> Union[None, Any]:
         """To be implemented in children classes. Should return either None if the step is not final."""
         pass
+
+    async def astep(self, memory_step: ActionStep) -> Union[None, Any]:
+        """
+        Asynchronous version of step to be implemented in child classes.
+        Returns None if the step is not final.
+        """
+        if hasattr(self, "step"):
+            return self.step(memory_step)
+        else:
+            raise NotImplementedError("Child class should implement either step() or astep()")
 
     def replay(self, detailed: bool = False):
         """Prints a pretty replay of the agent's steps.
@@ -625,10 +956,26 @@ You have been provided with these additional arguments, that you can access usin
         """
         self.memory.replay(self.logger, detailed=detailed)
 
-    def __call__(self, task: str, **kwargs):
-        """Adds additional prompting for the managed agent, runs it, and wraps the output.
-        This method is called only by a managed agent.
-        """
+    async def __call__(self, task: str, **kwargs):
+        """Asynchronous version of __call__"""
+        full_task = populate_template(
+            self.prompt_templates["managed_agent"]["task"],
+            variables=dict(name=self.name, task=task),
+        )
+        report = await self.arun(full_task, **kwargs)
+        answer = populate_template(
+            self.prompt_templates["managed_agent"]["report"], variables=dict(name=self.name, final_answer=report)
+        )
+        if self.provide_run_summary:
+            answer += "\n\nFor more detail, find below a summary of this agent's work:\n<summary_of_work>\n"
+            for message in self.write_memory_to_messages(summary_mode=True):
+                content = message["content"]
+                answer += "\n" + truncate_content(str(content)) + "\n---"
+            answer += "\n</summary_of_work>"
+        return answer
+        
+    def call(self, task: str, **kwargs):
+        """Synchronous version of __call__"""
         full_task = populate_template(
             self.prompt_templates["managed_agent"]["task"],
             variables=dict(name=self.name, task=task),
@@ -997,8 +1344,9 @@ class ToolCallingAgent(MultiStepAgent):
         )
         return system_prompt
 
-    def step(self, memory_step: ActionStep) -> Union[None, Any]:
+    async def astep(self, memory_step: ActionStep) -> Union[None, Any]:
         """
+        Asynchronous version of step.
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Returns None if the step is not final.
         """
@@ -1010,7 +1358,7 @@ class ToolCallingAgent(MultiStepAgent):
         memory_step.model_input_messages = memory_messages.copy()
 
         try:
-            model_message: ChatMessage = self.model(
+            model_message: ChatMessage = await self._async_model_call(
                 memory_messages,
                 tools_to_call_from=list(self.tools.values()),
                 stop_sequences=["Observation:", "Calling tools:"],
@@ -1069,7 +1417,7 @@ class ToolCallingAgent(MultiStepAgent):
         else:
             if tool_arguments is None:
                 tool_arguments = {}
-            observation = self.execute_tool_call(tool_name, tool_arguments)
+            observation = await self.execute_tool_call_async(tool_name, tool_arguments)
             observation_type = type(observation)
             if observation_type in [AgentImage, AgentAudio]:
                 if observation_type == AgentImage:
@@ -1135,14 +1483,15 @@ class CodeAgent(MultiStepAgent):
             planning_interval=planning_interval,
             **kwargs,
         )
+        self.executor_type = executor_type or "local"
+        self.executor_kwargs = executor_kwargs or {}
+        self.python_executor = self.create_python_executor()
+
         if "*" in self.additional_authorized_imports:
             self.logger.log(
                 "Caution: you set an authorization for all imports, meaning your agent can decide to import any package it deems necessary. This might raise issues if the package is not installed in your environment.",
                 0,
             )
-        self.executor_type = executor_type or "local"
-        self.executor_kwargs = executor_kwargs or {}
-        self.python_executor = self.create_python_executor()
 
     def create_python_executor(self) -> PythonExecutor:
         match self.executor_type:
@@ -1176,8 +1525,9 @@ class CodeAgent(MultiStepAgent):
         )
         return system_prompt
 
-    def step(self, memory_step: ActionStep) -> Union[None, Any]:
+    async def astep(self, memory_step: ActionStep) -> Union[None, Any]:
         """
+        Asynchronous version of step.
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Returns None if the step is not final.
         """
@@ -1189,7 +1539,7 @@ class CodeAgent(MultiStepAgent):
         memory_step.model_input_messages = memory_messages.copy()
         try:
             additional_args = {"grammar": self.grammar} if self.grammar is not None else {}
-            chat_message: ChatMessage = self.model(
+            chat_message: ChatMessage = await self._async_model_call(
                 self.input_messages,
                 stop_sequences=["<end_code>", "Observation:", "Calling tools:"],
                 **additional_args,

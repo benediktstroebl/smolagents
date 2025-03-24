@@ -192,6 +192,35 @@ class Tool:
             outputs = handle_agent_output_types(outputs, self.output_type)
         return outputs
 
+    async def __acall__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        """
+        Asynchronous version of __call__ that supports async forward methods.
+        """
+        if not self.is_initialized:
+            self.setup()
+
+        # Handle the arguments might be passed as a single dictionary
+        if len(args) == 1 and len(kwargs) == 0 and isinstance(args[0], dict):
+            potential_kwargs = args[0]
+
+            # If the dictionary keys match our input parameters, convert it to kwargs
+            if all(key in self.inputs for key in potential_kwargs):
+                args = ()
+                kwargs = potential_kwargs
+
+        if sanitize_inputs_outputs:
+            args, kwargs = handle_agent_input_types(*args, **kwargs)
+        
+        # Check if forward is a coroutine function and call it appropriately
+        if inspect.iscoroutinefunction(self.forward):
+            outputs = await self.forward(*args, **kwargs)
+        else:
+            outputs = self.forward(*args, **kwargs)
+            
+        if sanitize_inputs_outputs:
+            outputs = handle_agent_output_types(outputs, self.output_type)
+        return outputs
+
     def setup(self):
         """
         Overwrite this method here for any operation that is expensive and needs to be executed before you start using

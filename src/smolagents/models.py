@@ -344,6 +344,39 @@ class Model:
             `ChatMessage`: A chat message object containing the model's response.
         """
         pass  # To be implemented in child classes!
+        
+    async def acall(
+        self,
+        messages: List[Dict[str, str]],
+        stop_sequences: Optional[List[str]] = None,
+        grammar: Optional[str] = None,
+        tools_to_call_from: Optional[List[Tool]] = None,
+        **kwargs,
+    ) -> ChatMessage:
+        """Asynchronous version of __call__. By default falls back to synchronous call.
+        
+        Parameters:
+            messages (`List[Dict[str, str]]`):
+                A list of message dictionaries to be processed. Each dictionary should have the structure `{"role": "user/system", "content": "message content"}`.
+            stop_sequences (`List[str]`, *optional*):
+                A list of strings that will stop the generation if encountered in the model's output.
+            grammar (`str`, *optional*):
+                The grammar or formatting structure to use in the model's response.
+            tools_to_call_from (`List[Tool]`, *optional*):
+                A list of tools that the model can use to generate responses.
+            **kwargs:
+                Additional keyword arguments to be passed to the underlying model.
+                
+        Returns:
+            `ChatMessage`: A chat message object containing the model's response.
+        """
+        return self.__call__(
+            messages=messages,
+            stop_sequences=stop_sequences,
+            grammar=grammar,
+            tools_to_call_from=tools_to_call_from,
+            **kwargs
+        )
 
     def to_dict(self) -> Dict:
         """
