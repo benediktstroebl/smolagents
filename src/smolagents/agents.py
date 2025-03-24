@@ -67,6 +67,8 @@ from .utils import (
     is_valid_name,
     make_init_file,
     parse_code_blobs,
+    parse_json_tool_call,
+    make_json_serializable,
     truncate_content,
 )
 
@@ -709,6 +711,63 @@ You have been provided with these additional arguments, that you can access usin
         for memory_step in self.memory.steps:
             messages.extend(memory_step.to_messages(summary_mode=summary_mode))
         return messages
+    def get_succinct_logs(self):
+        return [
+            {key: value for key, value in log.items() if key != "agent_memory"}
+            for log in self.logs
+        ]
+        
+    def to_json(self) -> List[Dict]:
+        """
+        Convert the agent's logs into a JSON-serializable format.
+        Returns a list of dictionaries containing the step information.
+        """
+        json_logs = []
+        for step_log in self.logs:
+            if isinstance(step_log, SystemPromptStep):
+                json_log = {
+                    "type": "system_prompt",
+                    "system_prompt": step_log.system_prompt
+                }
+            elif isinstance(step_log, PlanningStep):
+                json_log = {
+                    "type": "planning",
+                    "plan": step_log.plan,
+                    "facts": step_log.facts
+                }
+            elif isinstance(step_log, TaskStep):
+                json_log = {
+                    "type": "task",
+                    "task": step_log.task
+                }
+            elif isinstance(step_log, ActionStep):
+                json_log = {
+                    "type": "action",
+                    "start_time": step_log.start_time,
+                    "end_time": step_log.end_time,
+                    "step": step_log.step,
+                    "duration": step_log.duration,
+                    "llm_output": step_log.llm_output,
+                    "observations": step_log.observations,
+                    "action_output": make_json_serializable(step_log.action_output),
+                }
+                
+                if step_log.tool_call:
+                    json_log["tool_call"] = {
+                        "name": step_log.tool_call.name,
+                        "arguments": make_json_serializable(step_log.tool_call.arguments),
+                        "id": step_log.tool_call.id
+                    }
+                
+                if step_log.error:
+                    json_log["error"] = {
+                        "type": step_log.error.__class__.__name__,
+                        "message": str(step_log.error)
+                    }
+
+            json_logs.append(json_log)
+            
+        return json_logs
 
     def visualize(self):
         """Creates a rich tree visualization of the agent's structure."""
@@ -1625,6 +1684,7 @@ class CodeAgent(MultiStepAgent):
     def to_dict(self) -> dict[str, Any]:
         """Convert the agent to a dictionary representation.
 
+
         Returns:
             `dict`: Dictionary representation of the agent.
         """
@@ -1634,3 +1694,59 @@ class CodeAgent(MultiStepAgent):
         agent_dict["executor_kwargs"] = self.executor_kwargs
         agent_dict["max_print_outputs_length"] = self.max_print_outputs_length
         return agent_dict
+
+class ManagedAgent:
+    def __init__(
+        self,
+        agent,
+        name,
+        description,
+        additional_prompting: Optional[str] = None,
+        provide_run_summary: bool = False,
+        managed_agent_prompt: Optional[str] = None,
+    ):
+        self.agent = agent
+        self.name = name
+        self.description = description
+        self.additional_prompting = additional_prompting
+        self.provide_run_summary = provide_run_summary
+        self.managed_agent_prompt = (
+            managed_agent_prompt if managed_agent_prompt else MANAGED_AGENT_PROMPT
+        )
+
+    def write_full_task(self, task):
+        """Adds additional prompting for the managed agent, like 'add more detail in your answer'."""
+        full_task = self.managed_agent_prompt.format(name=self.name, task=task)
+        if self.additional_prompting:
+            full_task = full_task.replace(
+                "\n{{additional_prompting}}", self.additional_prompting
+            ).strip()
+        else:
+            full_task = full_task.replace("\n{{additional_prompting}}", "").strip()
+        return full_task
+
+    def __call__(self, request, **kwargs):
+        full_task = self.write_full_task(request)
+        output = self.agent.run(full_task, **kwargs)
+        if self.provide_run_summary:
+            answer = (
+                f"Here is the final answer from your managed agent '{self.name}':\n"
+            )
+            answer += str(output)
+            answer += f"\n\nFor more detail, find below a summary of this agent's work:\nSUMMARY OF WORK FROM AGENT '{self.name}':\n"
+            for message in self.agent.write_inner_memory_from_logs(summary_mode=True):
+                content = message["content"]
+                answer += "\n" + truncate_content(str(content)) + "\n---"
+            answer += f"\nEND OF SUMMARY OF WORK FROM AGENT '{self.name}'."
+            return answer
+        else:
+            return output
+
+
+__all__ = [
+    "ManagedAgent",
+    "MultiStepAgent",
+    "CodeAgent",
+    "ToolCallingAgent",
+]
+
