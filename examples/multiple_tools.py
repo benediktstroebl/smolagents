@@ -3,19 +3,19 @@ from typing import Optional
 import requests
 
 # from smolagents.agents import ToolCallingAgent
-from smolagents import CodeAgent, HfApiModel, tool
+from smolagents import CodeAgent, HfApiModel, tool, ToolCallingAgent, LiteLLMModel
 
 
 # Choose which LLM engine to use!
-model = HfApiModel()
+# model = HfApiModel()
 # model = TransformersModel(model_id="meta-llama/Llama-3.2-2B-Instruct")
 
 # For anthropic: change model_id below to 'anthropic/claude-3-5-sonnet-20240620'
-# model = LiteLLMModel(model_id="gpt-4o")
+model = LiteLLMModel(model_id="gpt-4o-mini")
 
 
 @tool
-def get_weather(location: str, celsius: Optional[bool] = False) -> str:
+def get_weather(location: str, celsius: bool) -> str:
     """
     Get the current weather at the given location using the WeatherStack API.
 
@@ -194,11 +194,12 @@ def get_random_fact() -> str:
 
 
 @tool
-def search_wikipedia(query: str) -> str:
+def search_wikipedia(query: str, language: str) -> str:
     """
     Fetches a summary of a Wikipedia page for a given query.
     Args:
         query: The search term to look up on Wikipedia.
+        language: The language of the Wikipedia page to search for.
     Returns:
         str: A summary of the Wikipedia page if successful, or an error message if the request fails.
     Raises:
@@ -222,17 +223,17 @@ def search_wikipedia(query: str) -> str:
 
 # If you want to use the ToolCallingAgent instead, uncomment the following lines as they both will work
 
-# agent = ToolCallingAgent(
-#     tools=[
-#         convert_currency,
-#         get_weather,
-#         get_news_headlines,
-#         get_joke,
-#         get_random_fact,
-#         search_wikipedia,
-#     ],
-#     model=model,
-# )
+agent = ToolCallingAgent(
+    tools=[
+        convert_currency,
+        get_weather,
+        get_news_headlines,
+        get_joke,
+        get_random_fact,
+        search_wikipedia,
+    ],
+    model=model,
+)
 
 
 agent = CodeAgent(
@@ -249,8 +250,13 @@ agent = CodeAgent(
 
 # Uncomment the line below to run the agent with a specific query
 
-agent.run("5000 dollars to Euros")
-# agent.run("What is the weather in New York?")
+# agent.run("I'm looking to book a one-way flight from New York to Seattle on May 20th.")
+import asyncio
+import json
+response = asyncio.run(agent.arun("Search wikipedia for Elon Musk"))
+steps = agent.to_json()
+with open("steps.json", "w") as f:
+    json.dump(steps, f)
 # agent.run("Give me the top news headlines")
 # agent.run("Tell me a joke")
 # agent.run("Tell me a Random Fact")
