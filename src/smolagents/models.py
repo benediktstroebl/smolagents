@@ -251,6 +251,7 @@ class Model:
         flatten_messages_as_text: bool = False,
         tool_name_key: str = "name",
         tool_arguments_key: str = "arguments",
+        max_input_tokens: int = 100000,
         **kwargs,
     ):
         self.flatten_messages_as_text = flatten_messages_as_text
@@ -259,6 +260,78 @@ class Model:
         self.kwargs = kwargs
         self.last_input_token_count = None
         self.last_output_token_count = None
+        self.total_input_token_count = 0
+        self.total_output_token_count = 0
+        self.max_input_tokens = max_input_tokens
+
+    def truncate_messages_if_needed(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """
+        Truncates the message history if it's approaching the token limit.
+        Preserves system prompts and recent messages while removing older non-system messages as needed.
+        
+        Args:
+            messages (List[Dict[str, str]]): The list of messages
+            
+        Returns:
+            List[Dict[str, str]]: Truncated list of messages
+        """
+        if self.last_input_token_count is None or self.total_input_token_count < self.max_input_tokens * 0.8:
+            # No truncation needed if we're below 80% of the limit or don't have token count info yet
+            return messages
+        
+        # Log a warning when we're approaching the token limit
+        if self.total_input_token_count > self.max_input_tokens * 0.8:
+            logger.warning(
+                f"Token count is approaching limit: {self.total_input_token_count}/{self.max_input_tokens} tokens. "
+                "Context will be truncated to avoid exceeding the limit."
+            )
+            
+        # Always keep the system message(s) and process non-system messages
+        system_messages = [msg for msg in messages if msg["role"] == MessageRole.SYSTEM]
+        non_system_messages = [msg for msg in messages if msg["role"] != MessageRole.SYSTEM]
+        
+        # If we only have a few non-system messages, no need to truncate
+        if len(non_system_messages) <= 2:
+            return messages
+        
+        # Target is % of max to leave some room for the current request
+        target_token_count = int(self.max_input_tokens * 0.8)
+        
+        # Start removing oldest messages until we're below the target
+        removed_count = 0
+        keep_count = len(non_system_messages)
+        
+        # Estimate tokens per message based on the total input tokens and message count
+        avg_tokens_per_message = self.total_input_token_count / (len(system_messages) + len(non_system_messages))
+        
+        # Remove messages until we estimate we're below target
+        while keep_count > 2 and self.total_input_token_count - (removed_count * avg_tokens_per_message) > target_token_count:
+            removed_count += 1
+            keep_count -= 1
+        
+        # Ensure we keep at least 2 messages (1 user-assistant exchange)
+        keep_count = max(keep_count, 2)
+        removed_count = len(non_system_messages) - keep_count
+        
+        if removed_count > 0:
+            # Keep only the most recent messages
+            kept_messages = non_system_messages[-keep_count:]
+            
+            truncation_message = f"Note: {removed_count} earlier messages were removed to avoid exceeding the context window. Please continue based on recent context."
+            
+            # Create a truncation notice message that follows the same content format as other messages
+            truncation_notice = {
+                "role": MessageRole.SYSTEM,
+                "content": [{"type": "text", "text": truncation_message}] if self.flatten_messages_as_text else truncation_message
+            }
+            
+            # Construct the new truncated messages list
+            truncated_messages = system_messages + [truncation_notice] + kept_messages
+            logger.info(f"Removed {removed_count} messages to keep below token limit. Keeping {keep_count} most recent messages.")
+            return truncated_messages
+        
+        # No messages removed
+        return messages
 
     def _prepare_completion_kwargs(
         self,
@@ -278,6 +351,9 @@ class Model:
         2. Specific parameters (stop_sequences, grammar, etc.)
         3. Default values in self.kwargs
         """
+        # Apply message truncation if needed
+        messages = self.truncate_messages_if_needed(messages)
+        
         # Clean and standardize the message list
         messages = get_clean_message_list(
             messages,
@@ -387,6 +463,9 @@ class Model:
             "last_input_token_count": self.last_input_token_count,
             "last_output_token_count": self.last_output_token_count,
             "model_id": self.model_id,
+            "max_input_tokens": self.max_input_tokens,
+            "total_input_token_count": self.total_input_token_count,
+            "total_output_token_count": self.total_output_token_count,
         }
         for attribute in [
             "custom_role_conversion",
@@ -418,11 +497,13 @@ class Model:
             **{
                 k: v
                 for k, v in model_dictionary.items()
-                if k not in ["last_input_token_count", "last_output_token_count"]
+                if k not in ["last_input_token_count", "last_output_token_count", "total_input_token_count", "total_output_token_count"]
             }
         )
         model_instance.last_input_token_count = model_dictionary.pop("last_input_token_count", None)
         model_instance.last_output_token_count = model_dictionary.pop("last_output_token_count", None)
+        model_instance.total_input_token_count = model_dictionary.pop("total_input_token_count", 0)
+        model_instance.total_output_token_count = model_dictionary.pop("total_output_token_count", 0)
         return model_instance
 
 
@@ -514,6 +595,8 @@ class VLLMModel(Model):
         output_text = out[0].outputs[0].text
         self.last_input_token_count = len(out[0].prompt_token_ids)
         self.last_output_token_count = len(out[0].outputs[0].token_ids)
+        self.total_input_token_count += self.last_input_token_count
+        self.total_output_token_count += self.last_output_token_count
         chat_message = ChatMessage(
             role=MessageRole.ASSISTANT,
             content=output_text,
@@ -629,6 +712,8 @@ class MLXModel(Model):
             if found_stop_sequence:
                 break
 
+        self.total_input_token_count += self.last_input_token_count
+        self.total_output_token_count += self.last_output_token_count
         chat_message = ChatMessage(
             role=MessageRole.ASSISTANT, content=text, raw={"out": text, "completion_kwargs": completion_kwargs}
         )
@@ -827,6 +912,8 @@ class TransformersModel(Model):
             output_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         self.last_input_token_count = count_prompt_tokens
         self.last_output_token_count = len(generated_tokens)
+        self.total_input_token_count += self.last_input_token_count
+        self.total_output_token_count += self.last_output_token_count
 
         if stop_sequences is not None:
             output_text = remove_stop_sequences(output_text, stop_sequences)
@@ -939,6 +1026,8 @@ class LiteLLMModel(ApiModel):
 
         self.last_input_token_count = response.usage.prompt_tokens
         self.last_output_token_count = response.usage.completion_tokens
+        self.total_input_token_count += self.last_input_token_count
+        self.total_output_token_count += self.last_output_token_count
         first_message = ChatMessage.from_dict(
             response.choices[0].message.model_dump(include={"role", "content", "tool_calls"})
         )
@@ -1029,6 +1118,8 @@ class HfApiModel(ApiModel):
 
         self.last_input_token_count = response.usage.prompt_tokens
         self.last_output_token_count = response.usage.completion_tokens
+        self.total_input_token_count += self.last_input_token_count
+        self.total_output_token_count += self.last_output_token_count
         first_message = ChatMessage.from_hf_api(response.choices[0].message, raw=response)
         return self.postprocess_message(first_message, tools_to_call_from)
 
@@ -1109,6 +1200,8 @@ class OpenAIServerModel(ApiModel):
         response = self.client.chat.completions.create(**completion_kwargs)
         self.last_input_token_count = response.usage.prompt_tokens
         self.last_output_token_count = response.usage.completion_tokens
+        self.total_input_token_count += self.last_input_token_count
+        self.total_output_token_count += self.last_output_token_count
 
         first_message = ChatMessage.from_dict(
             response.choices[0].message.model_dump(include={"role", "content", "tool_calls"})
