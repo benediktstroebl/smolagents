@@ -732,7 +732,8 @@ You have been provided with these additional arguments, that you can access usin
                 json_log = {
                     "type": "planning",
                     "plan": step_log.plan,
-                    "facts": step_log.facts
+                    "model_input_messages": [{"role": message['role'], "content": message['content']} for message in step_log.model_input_messages] if step_log.model_input_messages else [],
+                    "model_output_message": json.loads(step_log.model_output_message.model_dump_json()) if step_log.model_output_message else {}
                 }
             elif isinstance(step_log, TaskStep):
                 json_log = {
@@ -740,29 +741,10 @@ You have been provided with these additional arguments, that you can access usin
                     "task": step_log.task
                 }
             elif isinstance(step_log, ActionStep):
-                json_log = {
-                    "type": "action",
-                    "start_time": step_log.start_time,
-                    "end_time": step_log.end_time,
-                    "step": step_log.step,
-                    "duration": step_log.duration,
-                    "llm_output": step_log.llm_output,
-                    "observations": step_log.observations,
-                    "action_output": make_json_serializable(step_log.action_output),
-                }
-                
-                if step_log.tool_call:
-                    json_log["tool_call"] = {
-                        "name": step_log.tool_call.name,
-                        "arguments": make_json_serializable(step_log.tool_call.arguments),
-                        "id": step_log.tool_call.id
-                    }
-                
-                if step_log.error:
-                    json_log["error"] = {
-                        "type": step_log.error.__class__.__name__,
-                        "message": str(step_log.error)
-                    }
+                json_log = step_log.dict()
+                json_log['type'] = 'action'
+                json_log['model_input_messages'] = [{"role": message['role'], "content": message['content']} for message in json_log['model_input_messages']] if json_log['model_input_messages'] else []
+                json_log['model_output_message'] = json_log['model_output_message'].model_dump_json() if json_log['model_output_message'] else {}
 
             json_logs.append(json_log)
             
