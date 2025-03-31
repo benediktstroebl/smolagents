@@ -22,8 +22,6 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from huggingface_hub.utils import is_torch_available
-
 from .tools import Tool
 from .utils import _is_package_available, encode_image_base64, make_image_url, parse_json_blob
 
@@ -101,7 +99,7 @@ class ChatMessage:
         return cls(role=message.role, content=message.content, tool_calls=tool_calls, raw=raw)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ChatMessage":
+    def from_dict(cls, data: dict, raw: Any | None = None) -> "ChatMessage":
         if data.get("tool_calls"):
             tool_calls = [
                 ChatMessageToolCall(
@@ -110,7 +108,7 @@ class ChatMessage:
                 for tc in data["tool_calls"]
             ]
             data["tool_calls"] = tool_calls
-        return cls(**data)
+        return cls(**data, raw=raw)
 
     def dict(self):
         return json.dumps(get_dict_from_nested_dataclasses(self))
@@ -251,7 +249,6 @@ class Model:
         flatten_messages_as_text: bool = False,
         tool_name_key: str = "name",
         tool_arguments_key: str = "arguments",
-        max_input_tokens: int = 100000,
         **kwargs,
     ):
         self.flatten_messages_as_text = flatten_messages_as_text
@@ -260,78 +257,6 @@ class Model:
         self.kwargs = kwargs
         self.last_input_token_count = None
         self.last_output_token_count = None
-        self.total_input_token_count = 0
-        self.total_output_token_count = 0
-        self.max_input_tokens = max_input_tokens
-
-    def truncate_messages_if_needed(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """
-        Truncates the message history if it's approaching the token limit.
-        Preserves system prompts and recent messages while removing older non-system messages as needed.
-        
-        Args:
-            messages (List[Dict[str, str]]): The list of messages
-            
-        Returns:
-            List[Dict[str, str]]: Truncated list of messages
-        """
-        if self.last_input_token_count is None or self.total_input_token_count < self.max_input_tokens * 0.8:
-            # No truncation needed if we're below 80% of the limit or don't have token count info yet
-            return messages
-        
-        # Log a warning when we're approaching the token limit
-        if self.total_input_token_count > self.max_input_tokens * 0.8:
-            logger.warning(
-                f"Token count is approaching limit: {self.total_input_token_count}/{self.max_input_tokens} tokens. "
-                "Context will be truncated to avoid exceeding the limit."
-            )
-            
-        # Always keep the system message(s) and process non-system messages
-        system_messages = [msg for msg in messages if msg["role"] == MessageRole.SYSTEM]
-        non_system_messages = [msg for msg in messages if msg["role"] != MessageRole.SYSTEM]
-        
-        # If we only have a few non-system messages, no need to truncate
-        if len(non_system_messages) <= 2:
-            return messages
-        
-        # Target is % of max to leave some room for the current request
-        target_token_count = int(self.max_input_tokens * 0.8)
-        
-        # Start removing oldest messages until we're below the target
-        removed_count = 0
-        keep_count = len(non_system_messages)
-        
-        # Estimate tokens per message based on the total input tokens and message count
-        avg_tokens_per_message = self.total_input_token_count / (len(system_messages) + len(non_system_messages))
-        
-        # Remove messages until we estimate we're below target
-        while keep_count > 2 and self.total_input_token_count - (removed_count * avg_tokens_per_message) > target_token_count:
-            removed_count += 1
-            keep_count -= 1
-        
-        # Ensure we keep at least 2 messages (1 user-assistant exchange)
-        keep_count = max(keep_count, 2)
-        removed_count = len(non_system_messages) - keep_count
-        
-        if removed_count > 0:
-            # Keep only the most recent messages
-            kept_messages = non_system_messages[-keep_count:]
-            
-            truncation_message = f"Note: {removed_count} earlier messages were removed to avoid exceeding the context window. Please continue based on recent context."
-            
-            # Create a truncation notice message that follows the same content format as other messages
-            truncation_notice = {
-                "role": MessageRole.SYSTEM,
-                "content": [{"type": "text", "text": truncation_message}] if self.flatten_messages_as_text else truncation_message
-            }
-            
-            # Construct the new truncated messages list
-            truncated_messages = system_messages + [truncation_notice] + kept_messages
-            logger.info(f"Removed {removed_count} messages to keep below token limit. Keeping {keep_count} most recent messages.")
-            return truncated_messages
-        
-        # No messages removed
-        return messages
 
     def _prepare_completion_kwargs(
         self,
@@ -351,9 +276,6 @@ class Model:
         2. Specific parameters (stop_sequences, grammar, etc.)
         3. Default values in self.kwargs
         """
-        # Apply message truncation if needed
-        messages = self.truncate_messages_if_needed(messages)
-        
         # Clean and standardize the message list
         messages = get_clean_message_list(
             messages,
@@ -420,39 +342,6 @@ class Model:
             `ChatMessage`: A chat message object containing the model's response.
         """
         pass  # To be implemented in child classes!
-        
-    async def acall(
-        self,
-        messages: List[Dict[str, str]],
-        stop_sequences: Optional[List[str]] = None,
-        grammar: Optional[str] = None,
-        tools_to_call_from: Optional[List[Tool]] = None,
-        **kwargs,
-    ) -> ChatMessage:
-        """Asynchronous version of __call__. By default falls back to synchronous call.
-        
-        Parameters:
-            messages (`List[Dict[str, str]]`):
-                A list of message dictionaries to be processed. Each dictionary should have the structure `{"role": "user/system", "content": "message content"}`.
-            stop_sequences (`List[str]`, *optional*):
-                A list of strings that will stop the generation if encountered in the model's output.
-            grammar (`str`, *optional*):
-                The grammar or formatting structure to use in the model's response.
-            tools_to_call_from (`List[Tool]`, *optional*):
-                A list of tools that the model can use to generate responses.
-            **kwargs:
-                Additional keyword arguments to be passed to the underlying model.
-                
-        Returns:
-            `ChatMessage`: A chat message object containing the model's response.
-        """
-        return self.__call__(
-            messages=messages,
-            stop_sequences=stop_sequences,
-            grammar=grammar,
-            tools_to_call_from=tools_to_call_from,
-            **kwargs
-        )
 
     def to_dict(self) -> Dict:
         """
@@ -463,9 +352,6 @@ class Model:
             "last_input_token_count": self.last_input_token_count,
             "last_output_token_count": self.last_output_token_count,
             "model_id": self.model_id,
-            "max_input_tokens": self.max_input_tokens,
-            "total_input_token_count": self.total_input_token_count,
-            "total_output_token_count": self.total_output_token_count,
         }
         for attribute in [
             "custom_role_conversion",
@@ -497,13 +383,11 @@ class Model:
             **{
                 k: v
                 for k, v in model_dictionary.items()
-                if k not in ["last_input_token_count", "last_output_token_count", "total_input_token_count", "total_output_token_count"]
+                if k not in ["last_input_token_count", "last_output_token_count"]
             }
         )
         model_instance.last_input_token_count = model_dictionary.pop("last_input_token_count", None)
         model_instance.last_output_token_count = model_dictionary.pop("last_output_token_count", None)
-        model_instance.total_input_token_count = model_dictionary.pop("total_input_token_count", 0)
-        model_instance.total_output_token_count = model_dictionary.pop("total_output_token_count", 0)
         return model_instance
 
 
@@ -595,8 +479,6 @@ class VLLMModel(Model):
         output_text = out[0].outputs[0].text
         self.last_input_token_count = len(out[0].prompt_token_ids)
         self.last_output_token_count = len(out[0].outputs[0].token_ids)
-        self.total_input_token_count += self.last_input_token_count
-        self.total_output_token_count += self.last_output_token_count
         chat_message = ChatMessage(
             role=MessageRole.ASSISTANT,
             content=output_text,
@@ -685,7 +567,7 @@ class MLXModel(Model):
             **kwargs,
         )
         messages = completion_kwargs.pop("messages")
-        prepared_stop_sequences = completion_kwargs.pop("stop", [])
+        stops = completion_kwargs.pop("stop", [])
         tools = completion_kwargs.pop("tools", None)
         completion_kwargs.pop("tool_choice", None)
 
@@ -698,22 +580,13 @@ class MLXModel(Model):
         self.last_input_token_count = len(prompt_ids)
         self.last_output_token_count = 0
         text = ""
-
-        found_stop_sequence = False
-        for _ in self.stream_generate(self.model, self.tokenizer, prompt=prompt_ids, **completion_kwargs):
+        for response in self.stream_generate(self.model, self.tokenizer, prompt=prompt_ids, **completion_kwargs):
             self.last_output_token_count += 1
-            text += _.text
-            for stop_sequence in prepared_stop_sequences:
-                stop_sequence_start = text.rfind(stop_sequence)
-                if stop_sequence_start != -1:
-                    text = text[:stop_sequence_start]
-                    found_stop_sequence = True
-                    break
-            if found_stop_sequence:
+            text += response.text
+            if any((stop_index := text.rfind(stop)) != -1 for stop in stops):
+                text = text[:stop_index]
                 break
 
-        self.total_input_token_count += self.last_input_token_count
-        self.total_output_token_count += self.last_output_token_count
         chat_message = ChatMessage(
             role=MessageRole.ASSISTANT, content=text, raw={"out": text, "completion_kwargs": completion_kwargs}
         )
@@ -770,12 +643,13 @@ class TransformersModel(Model):
         trust_remote_code: bool = False,
         **kwargs,
     ):
-        if not is_torch_available() or not _is_package_available("transformers"):
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+        except ModuleNotFoundError:
             raise ModuleNotFoundError(
                 "Please install 'transformers' extra to use 'TransformersModel': `pip install 'smolagents[transformers]'`"
             )
-        import torch
-        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
         if not model_id:
             warnings.warn(
@@ -800,23 +674,23 @@ class TransformersModel(Model):
         logger.info(f"Using device: {device_map}")
         self._is_vlm = False
         try:
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = AutoModelForImageTextToText.from_pretrained(
                 model_id,
                 device_map=device_map,
                 torch_dtype=torch_dtype,
                 trust_remote_code=trust_remote_code,
             )
-            self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+            self._is_vlm = True
         except ValueError as e:
             if "Unrecognized configuration class" in str(e):
-                self.model = AutoModelForImageTextToText.from_pretrained(
+                self.model = AutoModelForCausalLM.from_pretrained(
                     model_id,
                     device_map=device_map,
                     torch_dtype=torch_dtype,
                     trust_remote_code=trust_remote_code,
                 )
-                self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
-                self._is_vlm = True
+                self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
             else:
                 raise e
         except Exception as e:
@@ -912,8 +786,6 @@ class TransformersModel(Model):
             output_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         self.last_input_token_count = count_prompt_tokens
         self.last_output_token_count = len(generated_tokens)
-        self.total_input_token_count += self.last_input_token_count
-        self.total_output_token_count += self.last_output_token_count
 
         if stop_sequences is not None:
             output_text = remove_stop_sequences(output_text, stop_sequences)
@@ -962,6 +834,8 @@ class LiteLLMModel(ApiModel):
             Useful for specific models that do not support specific message roles like "system".
         flatten_messages_as_text (`bool`, *optional*): Whether to flatten messages as text.
             Defaults to `True` for models that start with "ollama", "groq", "cerebras".
+        max_tokens_limit (`int`, *optional*):
+            Maximum token limit for context window. If set, messages will be truncated to fit within this limit.
         **kwargs:
             Additional keyword arguments to pass to the OpenAI API.
     """
@@ -973,6 +847,7 @@ class LiteLLMModel(ApiModel):
         api_key=None,
         custom_role_conversions: Optional[Dict[str, str]] = None,
         flatten_messages_as_text: bool | None = None,
+        max_tokens_limit: Optional[int] = 110000,
         **kwargs,
     ):
         if not model_id:
@@ -987,12 +862,77 @@ class LiteLLMModel(ApiModel):
         self.api_base = api_base
         self.api_key = api_key
         self.custom_role_conversions = custom_role_conversions
+        self.max_tokens_limit = max_tokens_limit
         flatten_messages_as_text = (
             flatten_messages_as_text
             if flatten_messages_as_text is not None
             else self.model_id.startswith(("ollama", "groq", "cerebras"))
         )
         super().__init__(flatten_messages_as_text=flatten_messages_as_text, **kwargs)
+
+    def count_tokens(self, messages):
+        """Count tokens for messages using tiktoken."""
+        try:
+            import tiktoken
+        except ModuleNotFoundError:
+            raise ModuleNotFoundError(
+                "Please install 'tiktoken' to use token counting: `pip install tiktoken`"
+            )
+        
+        # Always use cl100k_base tokenizer
+        encoding = tiktoken.get_encoding("cl100k_base")
+        
+        num_tokens = 0
+        for message in messages:
+            if "content" in message:
+                content = message["content"]
+                if isinstance(content, list):
+                    for item in content:
+                        if item["type"] == "text":
+                            num_tokens += len(encoding.encode(item["text"]))
+                        # Images typically have a fixed token cost - this is an approximation
+                        elif item["type"] == "image":
+                            num_tokens += 85  # Approximation for low-res images in most models
+                else:
+                    num_tokens += len(encoding.encode(str(content)))
+        
+        return num_tokens
+
+    def truncate_messages(self, messages, max_tokens):
+        """Truncate messages to fit within max_tokens limit by removing oldest messages first."""
+        if not max_tokens:
+            return messages
+        
+        # Make a copy of the messages list to avoid modifying the original
+        messages_copy = deepcopy(messages)
+        
+        # Count tokens in current messages
+        token_count = self.count_tokens(messages_copy)
+        
+        print(f"Token count: {token_count}")
+        
+        # Keep removing oldest messages until below limit
+        while token_count > max_tokens and len(messages_copy) > 1:
+            # Find oldest non-system message to remove first
+            non_system_indices = [i for i, msg in enumerate(messages_copy) if msg.get("role") != "system"]
+            
+            if non_system_indices:
+                # Remove oldest non-system message
+                removed_message = messages_copy.pop(non_system_indices[0])
+            else:
+                # If only system messages remain and we still need to truncate, remove oldest message
+                removed_message = messages_copy.pop(0)
+                
+            # Recalculate token count
+            token_count = self.count_tokens(messages_copy)
+        print(f"Token count after removal: {token_count}")
+        if token_count > max_tokens:
+            logger.warning(
+                f"Even after removing messages, token count ({token_count}) still exceeds limit ({max_tokens}). "
+                f"This may cause issues with the API call."
+            )
+        
+        return messages_copy
 
     def __call__(
         self,
@@ -1008,6 +948,10 @@ class LiteLLMModel(ApiModel):
             raise ModuleNotFoundError(
                 "Please install 'litellm' extra to use LiteLLMModel: `pip install 'smolagents[litellm]'`"
             )
+        
+        # Handle token limit if specified
+        if self.max_tokens_limit:
+            messages = self.truncate_messages(messages, self.max_tokens_limit)
 
         completion_kwargs = self._prepare_completion_kwargs(
             messages=messages,
@@ -1026,12 +970,10 @@ class LiteLLMModel(ApiModel):
 
         self.last_input_token_count = response.usage.prompt_tokens
         self.last_output_token_count = response.usage.completion_tokens
-        self.total_input_token_count += self.last_input_token_count
-        self.total_output_token_count += self.last_output_token_count
         first_message = ChatMessage.from_dict(
-            response.choices[0].message.model_dump(include={"role", "content", "tool_calls"})
+            response.choices[0].message.model_dump(include={"role", "content", "tool_calls"}),
+            raw=response,
         )
-        first_message.raw = response
         return self.postprocess_message(first_message, tools_to_call_from)
 
 
@@ -1118,8 +1060,6 @@ class HfApiModel(ApiModel):
 
         self.last_input_token_count = response.usage.prompt_tokens
         self.last_output_token_count = response.usage.completion_tokens
-        self.total_input_token_count += self.last_input_token_count
-        self.total_output_token_count += self.last_output_token_count
         first_message = ChatMessage.from_hf_api(response.choices[0].message, raw=response)
         return self.postprocess_message(first_message, tools_to_call_from)
 
@@ -1200,13 +1140,11 @@ class OpenAIServerModel(ApiModel):
         response = self.client.chat.completions.create(**completion_kwargs)
         self.last_input_token_count = response.usage.prompt_tokens
         self.last_output_token_count = response.usage.completion_tokens
-        self.total_input_token_count += self.last_input_token_count
-        self.total_output_token_count += self.last_output_token_count
 
         first_message = ChatMessage.from_dict(
-            response.choices[0].message.model_dump(include={"role", "content", "tool_calls"})
+            response.choices[0].message.model_dump(include={"role", "content", "tool_calls"}),
+            raw=response,
         )
-        first_message.raw = response
         return self.postprocess_message(first_message, tools_to_call_from)
 
 
