@@ -4,8 +4,8 @@ import threading
 
 from dotenv import load_dotenv
 from huggingface_hub import login
-from scripts.text_inspector_tool import TextInspectorTool
-from scripts.text_web_browser import (
+from .scripts.text_inspector_tool import TextInspectorTool
+from .scripts.text_web_browser import (
     ArchiveSearchTool,
     FinderTool,
     FindNextTool,
@@ -14,7 +14,7 @@ from scripts.text_web_browser import (
     SimpleTextBrowser,
     VisitTool,
 )
-from scripts.visual_qa import visualizer
+from .scripts.visual_qa import visualizer
 
 from smolagents import (
     CodeAgent,
@@ -22,6 +22,7 @@ from smolagents import (
     # HfApiModel,
     LiteLLMModel,
     ToolCallingAgent,
+    DuckDuckGoSearchTool,
 )
 
 
@@ -80,8 +81,6 @@ BROWSER_CONFIG = {
     "serpapi_key": os.getenv("SERPAPI_API_KEY"),
 }
 
-os.makedirs(f"./{BROWSER_CONFIG['downloads_folder']}", exist_ok=True)
-
 
 def create_agent(model_id="o1"):
     model_params = {
@@ -89,14 +88,14 @@ def create_agent(model_id="o1"):
         "custom_role_conversions": custom_role_conversions,
         "max_completion_tokens": 8192,
     }
-    if model_id == "o1":
-        model_params["reasoning_effort"] = "high"
+    # if model_id == "o1":
+    #     model_params["reasoning_effort"] = "high"
     model = LiteLLMModel(**model_params)
 
     text_limit = 100000
     browser = SimpleTextBrowser(**BROWSER_CONFIG)
     WEB_TOOLS = [
-        GoogleSearchTool(provider="serper"),
+        DuckDuckGoSearchTool(),
         VisitTool(browser),
         PageUpTool(browser),
         PageDownTool(browser),
@@ -136,16 +135,3 @@ def create_agent(model_id="o1"):
 
     return manager_agent
 
-
-def main():
-    args = parse_args()
-
-    agent = create_agent(model_id=args.model_id)
-
-    answer = agent.run(args.question)
-
-    print(f"Got this answer: {answer}")
-
-
-if __name__ == "__main__":
-    main()
