@@ -16,7 +16,14 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
     
     os.makedirs(f"./{BROWSER_CONFIG['downloads_folder']}", exist_ok=True)
     
-    agent = create_agent(model_id=kwargs['model_name'])
+    model_params = {}
+    model_params['model_id'] = kwargs['model_name']
+    if 'reasoning_effort' in kwargs:
+        model_params['reasoning_effort'] = kwargs['reasoning_effort']
+    if 'temperature' in kwargs:
+        model_params['temperature'] = kwargs['temperature']
+    
+    agent = create_agent(model_params=model_params)
         
     response = asyncio.run(agent.arun(task['Question']))
     

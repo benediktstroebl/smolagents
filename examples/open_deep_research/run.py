@@ -82,14 +82,13 @@ BROWSER_CONFIG = {
 }
 
 
-def create_agent(model_id="o1"):
+def create_agent(model_params):
     model_params = {
-        "model_id": model_id,
         "custom_role_conversions": custom_role_conversions,
         "max_completion_tokens": 8192,
     }
-    # if model_id == "o1":
-    #     model_params["reasoning_effort"] = "high"
+    
+    model_params.update(model_params)
     model = LiteLLMModel(**model_params)
 
     text_limit = 100000
