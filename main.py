@@ -22,7 +22,17 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         model_params['reasoning_effort'] = kwargs['reasoning_effort']
     if 'temperature' in kwargs:
         model_params['temperature'] = kwargs['temperature']
-    
+        
+    if 'gemini' in kwargs['model_name']:
+        model_params['model_id'] = kwargs['model_name'].replace('gemini/', 'openai/')
+        model_params['api_key'] = os.getenv('GEMINI_API_KEY')
+        model_params['api_base'] = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        
+    if 'together_ai' in kwargs['model_name']:
+        model_params['model_id'] = kwargs['model_name'].replace('together_ai/', 'openai/')
+        model_params['api_key'] = os.environ.get("TOGETHERAI_API_KEY")
+        model_params['api_base'] = "https://api.together.xyz/v1"
+        
     agent = create_agent(model_params=model_params)
         
     response = asyncio.run(agent.arun(task['Question']))
