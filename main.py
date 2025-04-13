@@ -1,11 +1,24 @@
 from inspect_ai.util import sandbox
 
-import asyncio
-
+from smolagents.agents import ActionStep
+import json
 from examples.open_deep_research.run import create_agent, BROWSER_CONFIG
 
 from typing import Any
 import os
+
+def save_agent_steps(agent, kwargs, response, sample):
+    for step in agent.memory.steps:
+        if isinstance(step, ActionStep):
+            step.agent_memory = None
+    intermediate_steps = str(agent.memory.steps)
+    with open("steps.json", "w") as f:
+        json.dump({
+            "agent_args": kwargs,
+            "intermediate_steps": intermediate_steps,
+            "response": str(response),
+            "sample": sample
+            }, f, indent=2)
 
 def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
 
@@ -35,6 +48,8 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         
     agent = create_agent(model_params=model_params)
         
-    response = asyncio.run(agent.arun(task['Question']))
+    response = agent.run(task['Question'])
+    
+    save_agent_steps(agent, kwargs, response, task)
     
     return {task_id: response}
