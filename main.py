@@ -46,7 +46,7 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         model_params['api_key'] = os.environ.get("TOGETHERAI_API_KEY")
         model_params['api_base'] = "https://api.together.xyz/v1"
         
-    agent = create_agent(model_params=model_params)
+    agent = create_agent(model_params_input=model_params)
         
     response = agent.run(task['Question'])
     
