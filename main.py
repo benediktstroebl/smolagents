@@ -47,8 +47,19 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
         model_params['api_base'] = "https://api.together.xyz/v1"
         
     agent = create_agent(model_params_input=model_params)
+    
+    prompt = f"""Please answer the question below. You should:                                                                                                                   
+                                                                                                                                                                 
+- Return only your answer, which should be a number, or a short phrase with as few words as possible, or a comma separated list of numbers and/or strings.      
+- If the answer is a number, return only the number without any units unless specified otherwise.                                                               
+- If the answer is a string, don't include articles, and don't use abbreviations (e.g. for states).                                                             
+- If the answer is a comma separated list, apply the above rules to each element in the list.                                                                                                                                                                                                                    
+                                                                                                                                                                 
+Here is the question and attached files are stored in your current directory:
+
+{task['Question']}"""
         
-    response = agent.run(task['Question'])
+    response = agent.run(prompt)
     
     save_agent_steps(agent, kwargs, response, task)
     

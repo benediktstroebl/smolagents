@@ -53,7 +53,7 @@ AUTHORIZED_IMPORTS = [
     "csv",
 ]
 load_dotenv(override=True)
-login(os.getenv("HF_TOKEN"))
+# login(os.getenv("HF_TOKEN"))
 
 append_answer_lock = threading.Lock()
 
@@ -94,7 +94,7 @@ def create_agent(model_params_input):
     text_limit = 100000
     browser = SimpleTextBrowser(**BROWSER_CONFIG)
     WEB_TOOLS = [
-        DuckDuckGoSearchTool(),
+        GoogleSearchTool(provider="serpapi"),
         VisitTool(browser),
         PageUpTool(browser),
         PageDownTool(browser),
