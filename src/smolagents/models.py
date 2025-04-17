@@ -308,7 +308,9 @@ class Model:
         # Handle specific parameters
         if stop_sequences is not None:
             # Not supported with reasoning models openai/o3 and openai/o4-mini
-            if self.model_id.split("/")[-1] not in ["o3", "o4-mini"]:
+            if ("o3" in self.model_id.split("/")[-1] and "o3-mini" not in self.model_id.split("/")[-1]) or "o4-mini" in self.model_id.split("/")[-1]:
+                completion_kwargs.pop("stop", None)
+            else:
                 completion_kwargs["stop"] = stop_sequences
         if grammar is not None:
             completion_kwargs["grammar"] = grammar
