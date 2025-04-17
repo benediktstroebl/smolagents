@@ -86,6 +86,7 @@ def create_agent(model_params_input):
     model_params = {
         "custom_role_conversions": custom_role_conversions,
         "max_completion_tokens": 8192,
+        "allowed_openai_params": ['reasoning_effort']
     }
     
     model_params.update(model_params_input)
