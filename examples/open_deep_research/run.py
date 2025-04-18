@@ -59,9 +59,11 @@ BROWSER_CONFIG = {
 def create_agent(model_params_input):
     model_params = {
         "custom_role_conversions": custom_role_conversions,
-        "max_completion_tokens": 8192,
-        "allowed_openai_params": ['reasoning_effort']
+        "max_completion_tokens": 8192
     }
+    
+    if "o4-mini" in model_params_input["model_id"] or "o3" in model_params_input["model_id"]:
+        model_params["allowed_openai_params"] = ['reasoning_effort']
     
     model_params.update(model_params_input)
     model = LiteLLMModel(**model_params)
