@@ -27,7 +27,7 @@ from collections import deque
 from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional, Set, Tuple, TypedDict, Union
-
+from functools import partial
 import jinja2
 import yaml
 from huggingface_hub import create_repo, metadata_update, snapshot_download, upload_folder
@@ -243,7 +243,7 @@ class MultiStepAgent(ABC):
         self.step_callbacks = step_callbacks if step_callbacks is not None else []
         self.step_callbacks.append(self.monitor.update_metrics)
         
-        self.budget_exceeded_callback = budget_exceeded_callback if budget_exceeded_callback is not None else lambda: False
+        self.budget_exceeded_callback = partial(budget_exceeded_callback, agent=self) if budget_exceeded_callback is not None else lambda: False
 
     def _validate_name(self, name: str | None) -> str | None:
         if name is not None and not is_valid_name(name):
