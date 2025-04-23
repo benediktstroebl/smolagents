@@ -242,7 +242,7 @@ class MultiStepAgent(ABC):
         self.step_callbacks = step_callbacks if step_callbacks is not None else []
         self.step_callbacks.append(self.monitor.update_metrics)
         
-        self.cost_callback = cost_callback if cost_callback is not None else None
+        self.cost_callback = cost_callback if cost_callback is not None else lambda: False
 
     def _validate_name(self, name: str | None) -> str | None:
         if name is not None and not is_valid_name(name):
@@ -349,7 +349,7 @@ You have been provided with these additional arguments, that you can access usin
     ) -> Generator[ActionStep | AgentType, None, None]:
         final_answer = None
         self.step_number = 1
-        while final_answer is None and self.step_number <= max_steps:
+        while final_answer is None and self.step_number <= max_steps and not self.cost_callback():
             if self.interrupt_switch:
                 raise AgentError("Agent interrupted.", self.logger)
             step_start_time = time.time()
@@ -380,10 +380,9 @@ You have been provided with these additional arguments, that you can access usin
             final_answer = self._handle_max_steps_reached(task, images, step_start_time)
             yield action_step
             
-        elif final_answer is None and self.cost_callback is not None:
-            if self.cost_callback():
-                final_answer = self._handle_cost_exceeded(task, images, step_start_time)
-                yield action_step
+        elif final_answer is None and self.cost_callback():
+            final_answer = self._handle_cost_exceeded(task, images, step_start_time)
+            yield action_step
             
         yield FinalAnswerStep(handle_agent_output_types(final_answer))
 
