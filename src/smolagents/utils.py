@@ -105,6 +105,12 @@ class AgentMaxStepsError(AgentError):
     pass
 
 
+class AgentBudgetExceededError(AgentError):
+    """Exception raised for errors when the budget has been exceeded"""
+
+    pass
+
+
 class AgentToolCallError(AgentExecutionError):
     """Exception raised for errors when incorrect arguments are passed to the tool"""
 

@@ -62,6 +62,7 @@ from .utils import (
     AgentExecutionError,
     AgentGenerationError,
     AgentMaxStepsError,
+    AgentBudgetExceededError,
     AgentParsingError,
     AgentToolCallError,
     AgentToolExecutionError,
@@ -174,7 +175,7 @@ class MultiStepAgent(ABC):
         grammar (`dict[str, str]`, *optional*): Grammar used to parse the LLM output.
         managed_agents (`list`, *optional*): Managed agents that the agent can call.
         step_callbacks (`list[Callable]`, *optional*): Callbacks that will be called at each step.
-        cost_callback (`Callable`, *optional*): Callback that will be called to check if the budget has been exceeded.
+        budget_exceeded_callback (`Callable`, *optional*): Callback that will be called to check if the budget has been exceeded. If the callback returns `True`, the agent will stop and return the final answer.
         planning_interval (`int`, *optional*): Interval at which the agent will run a planning step.
         name (`str`, *optional*): Necessary for a managed agent only - the name by which this agent can be called.
         description (`str`, *optional*): Necessary for a managed agent only - the description of this agent.
@@ -193,7 +194,7 @@ class MultiStepAgent(ABC):
         grammar: Optional[Dict[str, str]] = None,
         managed_agents: Optional[List] = None,
         step_callbacks: Optional[List[Callable]] = None,
-        cost_callback: Optional[Callable] = None,
+        budget_exceeded_callback: Optional[Callable] = None,
         planning_interval: Optional[int] = None,
         name: Optional[str] = None,
         description: Optional[str] = None,
@@ -242,7 +243,7 @@ class MultiStepAgent(ABC):
         self.step_callbacks = step_callbacks if step_callbacks is not None else []
         self.step_callbacks.append(self.monitor.update_metrics)
         
-        self.cost_callback = cost_callback if cost_callback is not None else lambda: False
+        self.budget_exceeded_callback = budget_exceeded_callback if budget_exceeded_callback is not None else lambda: False
 
     def _validate_name(self, name: str | None) -> str | None:
         if name is not None and not is_valid_name(name):
@@ -349,7 +350,7 @@ You have been provided with these additional arguments, that you can access usin
     ) -> Generator[ActionStep | AgentType, None, None]:
         final_answer = None
         self.step_number = 1
-        while final_answer is None and self.step_number <= max_steps and not self.cost_callback():
+        while final_answer is None and self.step_number <= max_steps and not self.budget_exceeded_callback():
             if self.interrupt_switch:
                 raise AgentError("Agent interrupted.", self.logger)
             step_start_time = time.time()
@@ -380,7 +381,7 @@ You have been provided with these additional arguments, that you can access usin
             final_answer = self._handle_max_steps_reached(task, images, step_start_time)
             yield action_step
             
-        elif final_answer is None and self.cost_callback():
+        elif final_answer is None and self.budget_exceeded_callback():
             final_answer = self._handle_cost_exceeded(task, images, step_start_time)
             yield action_step
             
@@ -430,7 +431,7 @@ You have been provided with these additional arguments, that you can access usin
     def _handle_cost_exceeded(self, task: str, images: List["PIL.Image.Image"], step_start_time: float) -> Any:
         final_answer = self.provide_final_answer(task, images)
         final_memory_step = ActionStep(
-            step_number=self.step_number, error=AgentMaxStepsError("Max cost exceeded.", self.logger)
+            step_number=self.step_number, error=AgentBudgetExceededError("Budget exceeded.", self.logger)
         )
         final_memory_step.action_output = final_answer
         final_memory_step.end_time = time.time()
